@@ -1,0 +1,36 @@
+{
+  "generated_by": "dev-env-builder",
+  "version": "0.1.0",
+  "framework": "flutter",
+  "level": "middle",
+  "features": {
+    "db": false,
+    "tests": false,
+    "mistakes": true,
+    "patch": true,
+    "husky": false,
+    "ci": false,
+    "formatting": true
+  },
+  "managed_files": [
+    ".editorconfig",
+    ".opencode/agents/repo-manager.md",
+    ".opencode/commands/create-patch.md",
+    ".opencode/commands/git-status.md",
+    ".opencode/commands/safe-push.md",
+    ".opencode/commands/ship.md",
+    ".opencode/commands/verify.md",
+    ".vscode/settings.json",
+    "AGENTS.md",
+    "docs/architecture/README.md",
+    "docs/change-log/README.md",
+    "docs/decisions/README.md",
+    "docs/development-guidelines.md",
+    "docs/documentation-index.md",
+    "docs/git-workflow.md",
+    "docs/AI-rules.md",
+    "docs/solving-mistakes/README.md",
+    "opencode.json",
+    ".devenv-manifest.json"
+  ]
+}

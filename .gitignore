@@ -1,0 +1,22 @@
+# Pairing credentials and local secrets
+.secrets/
+*.env.local
+.env
+.env.*
+!.env.example
+
+# Dart / Flutter generated files
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Editor / platform-generated files
+*.iml
+.idea/
+
+# Agents
+.opencode/
