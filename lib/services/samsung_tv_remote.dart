@@ -5,97 +5,77 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../models/saved_device.dart';
+
 enum TvConnectionState { disconnected, connecting, awaitingApproval, connected }
 
-/// An Android/iOS Dart-IO LAN controller for Samsung's Tizen remote WebSocket.
-///
-/// This prototype accepts an untrusted TLS certificate ONLY for the chosen
-/// IP:8002 endpoint. That does not authenticate the TV; do not ship this trust
-/// policy in production. The UI warns users about this development limitation.
+/// Samsung Tizen local-network remote. Testing-only TLS exception below:
+/// a trusted IP is NOT equivalent to authenticating the certificate.
 class SamsungTvRemote extends ChangeNotifier {
   SamsungTvRemote({FlutterSecureStorage? storage})
       : _storage = storage ?? const FlutterSecureStorage();
 
-  static const _name = 'UniversalRemoteFlutter';
-  static const _port = 8002;
-  static const _ipStorageKey = 'samsung_tv_ip';
-
+  static const _appName = 'UniversalRemoteFlutter'; // Keep stable for remembered grants.
   final FlutterSecureStorage _storage;
+  static const _port = 8002;
   WebSocket? _socket;
   HttpClient? _client;
   StreamSubscription<dynamic>? _subscription;
   Completer<bool>? _approval;
   int _generation = 0;
   bool _disposed = false;
+  SavedDevice? _device;
 
-  String ip = '192.168.29.179'; // Initial suggestion; user can edit.
   TvConnectionState state = TvConnectionState.disconnected;
   String? error;
-
-  bool get isConnected =>
-      state == TvConnectionState.connected &&
+  String get ip => _device?.ip ?? '';
+  bool get isConnected => state == TvConnectionState.connected &&
       _socket?.readyState == WebSocket.open;
+  String get _tokenKey => 'samsung_token_device_${_device!.id}';
 
-  void _update(TvConnectionState next, {String? message}) {
+  void _update(TvConnectionState value, {String? message}) {
     if (_disposed) return;
-    state = next;
+    state = value;
     error = message;
     notifyListeners();
   }
 
-  Future<void> loadSettings() async {
-    try {
-      final saved = await _storage.read(key: _ipStorageKey);
-      if (saved != null && InternetAddress.tryParse(saved)?.type ==
-          InternetAddressType.IPv4) {
-        ip = saved;
-        notifyListeners();
-      }
-    } catch (_) {
-      _update(state, message: 'Could not load saved device settings.');
-    }
+  Future<void> configure(SavedDevice device) async {
+    await disconnect();
+    _device = device;
   }
 
-  Future<void> changeIp(String value) async {
-    final candidate = value.trim();
-    if (InternetAddress.tryParse(candidate)?.type !=
-        InternetAddressType.IPv4) {
-      throw const FormatException('Enter a valid IPv4 address.');
-    }
-    await disconnect();
-    ip = candidate;
-    notifyListeners();
-    await _storage.write(key: _ipStorageKey, value: candidate);
+  Future<void> forgetToken(SavedDevice device) async {
+    await _storage.delete(key: 'samsung_token_device_${device.id}');
+    await _storage.delete(key: 'samsung_token_${device.ip}');
   }
 
   Future<void> connect() async {
+    if (_device == null) {
+      _update(TvConnectionState.disconnected, message: 'No TV selected.');
+      return;
+    }
     await disconnect();
     final generation = ++_generation;
+    final address = ip;
     _update(TvConnectionState.connecting);
     try {
-      final token = await _storage.read(key: 'samsung_token_$ip');
+      // Migrate previously saved per-IP tokens from the first Flutter prototype.
+      var token = await _storage.read(key: _tokenKey);
+      token ??= await _storage.read(key: 'samsung_token_$address');
       if (generation != _generation || _disposed) return;
-
       final query = <String, String>{
-        'name': base64Encode(utf8.encode(_name)),
+        'name': base64Encode(utf8.encode(_appName)),
         if (token != null && token.isNotEmpty) 'token': token,
       };
-      final uri = Uri(
-        scheme: 'wss',
-        host: ip,
-        port: _port,
+      final uri = Uri(scheme: 'wss', host: address, port: _port,
         path: '/api/v2/channels/samsung.remote.control',
-        queryParameters: query,
-      );
-
+        queryParameters: query);
       _client = HttpClient()
-        ..badCertificateCallback = (certificate, host, port) =>
-            host == ip && port == _port;
-      final socket = await WebSocket.connect(
-        uri.toString(),
-        customClient: _client,
-      ).timeout(const Duration(seconds: 10));
-
+        ..badCertificateCallback = (_, host, port) =>
+            host == address && port == _port; // DEV ONLY, not for public release.
+      final socket = await WebSocket.connect(uri.toString(), customClient: _client)
+          .timeout(const Duration(seconds: 10));
       if (_disposed || generation != _generation) {
         await socket.close();
         return;
@@ -104,20 +84,16 @@ class SamsungTvRemote extends ChangeNotifier {
       final approval = Completer<bool>();
       _approval = approval;
       _subscription = socket.listen(
-        (message) => _handleMessage(message, generation),
+        (message) => unawaited(_handleMessage(message, generation)),
         onError: (Object _) => _handleClose(generation),
-        onDone: () => _handleClose(generation),
-        cancelOnError: true,
-      );
+        onDone: () => _handleClose(generation), cancelOnError: true);
       _update(TvConnectionState.awaitingApproval);
-      final authorized = await approval.future.timeout(
-        const Duration(seconds: 60),
-      );
+      final authorized = await approval.future.timeout(const Duration(seconds: 60));
       if (generation != _generation || _disposed) return;
       if (!authorized) {
         await disconnect();
         _update(TvConnectionState.disconnected,
-            message: 'TV declined or closed the connection. Check its device permissions.');
+            message: 'TV declined or closed the pairing request.');
         return;
       }
       _update(TvConnectionState.connected);
@@ -125,98 +101,79 @@ class SamsungTvRemote extends ChangeNotifier {
       if (generation != _generation || _disposed) return;
       await disconnect();
       _update(TvConnectionState.disconnected,
-          message: 'Connection timed out. Check the TV, Wi-Fi and approval popup.');
+          message: 'Connection timed out. Check the TV and Wi-Fi.');
     } catch (_) {
       if (generation != _generation || _disposed) return;
       await disconnect();
-      // Never print errors containing a URL with a pairing token.
       _update(TvConnectionState.disconnected,
-          message: 'Connection failed. Check IP, TV power, and local Wi-Fi.');
+          message: 'Cannot connect. Confirm TV power and local Wi-Fi.');
     }
   }
 
   Future<void> _handleMessage(dynamic message, int generation) async {
     if (_disposed || generation != _generation) return;
     try {
-      final data = jsonDecode(message.toString());
-      if (data is! Map<String, dynamic>) return;
-      switch (data['event']) {
+      final payload = jsonDecode(message.toString());
+      if (payload is! Map<String, dynamic>) return;
+      switch (payload['event']) {
         case 'ms.channel.connect':
-          final body = data['data'];
-          if (body is Map && body['token'] != null) {
-            await _storage.write(
-              key: 'samsung_token_$ip',
-              value: body['token'].toString(),
-            );
+          final body = payload['data'];
+          if (body is Map && body['token'] != null && _device != null) {
+            // Persist before declaring pairing successful.
+            await _storage.write(key: _tokenKey, value: body['token'].toString());
           }
-          if (generation == _generation &&
-              _approval != null && !_approval!.isCompleted) {
-            _approval!.complete(true);
-          }
+          if (generation == _generation && _approval != null &&
+              !_approval!.isCompleted) _approval!.complete(true);
           return;
         case 'ms.channel.unauthorized':
-          if (_approval != null && !_approval!.isCompleted) {
-            _approval!.complete(false);
-          }
-          _update(state, message: 'TV rejected authorization.');
+          if (_approval != null && !_approval!.isCompleted) _approval!.complete(false);
+          _update(state, message: 'TV denied pairing.');
           return;
         case 'ms.error':
-          _update(state, message: 'TV returned an error for the request.');
+          _update(state, message: 'The TV reported a remote-control error.');
           return;
       }
     } catch (_) {
-      if (_approval != null && !_approval!.isCompleted) {
-        _approval!.complete(false);
-      }
-      _update(state, message: 'Unable to process the TV response.');
+      if (_approval != null && !_approval!.isCompleted) _approval!.complete(false);
+      _update(state, message: 'Could not process the TV response.');
     }
   }
 
   void _handleClose(int generation) {
     if (_disposed || generation != _generation) return;
-    if (_approval != null && !_approval!.isCompleted) {
-      _approval!.complete(false);
-    }
+    if (_approval != null && !_approval!.isCompleted) _approval!.complete(false);
     _update(TvConnectionState.disconnected,
-        message: 'TV connection closed. Tap Connect to retry.');
+        message: 'TV connection closed. Reconnect to continue.');
   }
 
-  /// Sending means the WebSocket accepted the payload, not that TV executed it.
+  /// The transport accepting a command doesn't guarantee TV execution.
   bool sendKey(String key) {
     if (!isConnected) return false;
     try {
-      _socket!.add(jsonEncode({
-        'method': 'ms.remote.control',
-        'params': {
-          'Cmd': 'Click',
-          'DataOfCmd': key,
-          'Option': 'false',
-          'TypeOfRemote': 'SendRemoteKey',
-        },
-      }));
+      _socket!.add(jsonEncode({'method': 'ms.remote.control', 'params': {
+        'Cmd': 'Click', 'DataOfCmd': key, 'Option': 'false',
+        'TypeOfRemote': 'SendRemoteKey',
+      }}));
       return true;
     } catch (_) {
-      _update(TvConnectionState.disconnected,
-          message: 'Could not send the command. Reconnect to the TV.');
+      _update(TvConnectionState.disconnected, message: 'Command failed. Reconnect.');
       return false;
     }
   }
 
   Future<void> disconnect() async {
     ++_generation;
-    if (_approval != null && !_approval!.isCompleted) {
-      _approval!.complete(false);
-    }
+    if (_approval != null && !_approval!.isCompleted) _approval!.complete(false);
     _approval = null;
-    final oldSubscription = _subscription;
-    final oldSocket = _socket;
-    final oldClient = _client;
+    final subscription = _subscription;
+    final socket = _socket;
+    final client = _client;
     _subscription = null;
     _socket = null;
     _client = null;
-    await oldSubscription?.cancel();
-    await oldSocket?.close();
-    oldClient?.close(force: true);
+    await subscription?.cancel();
+    await socket?.close();
+    client?.close(force: true);
     _update(TvConnectionState.disconnected);
   }
 

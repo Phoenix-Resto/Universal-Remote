@@ -1,30 +1,30 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:universal_remote/main.dart';
+import 'package:universal_remote/models/saved_device.dart';
+import 'package:universal_remote/widgets/samsung_remote_surface.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  test('Saving and restoring a Samsung device preserves identity', () {
+    const device = SavedDevice(
+      id: 'uuid:test', name: 'Living Room TV',
+      ip: '192.168.29.179', model: 'UA32M4300');
+    final restored = SavedDevice.fromJson(device.toJson());
+    expect(restored.id, device.id);
+    expect(restored.ip, device.ip);
+    expect(restored.copyWith(name: 'Bedroom TV').name, 'Bedroom TV');
+    expect(restored.copyWith(name: 'Bedroom TV').id, device.id);
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  testWidgets('The realistic remote contains HDMI and media rows', (tester) async {
+    final commands = <String>[];
+    await tester.pumpWidget(MaterialApp(home: Scaffold(
+      body: SingleChildScrollView(child: SamsungRemoteSurface(onKey: commands.add)),
+    )));
+    expect(find.text('HDMI'), findsOneWidget);
+    expect(find.text('P.MODE'), findsOneWidget);
+    expect(find.text('SRS'), findsOneWidget);
+    await tester.ensureVisible(find.text('HDMI'));
+    await tester.tap(find.text('HDMI'));
+    expect(commands, contains('KEY_HDMI'));
   });
 }

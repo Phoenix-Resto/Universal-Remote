@@ -11,6 +11,7 @@
 .pub-cache/
 .pub/
 build/
+debug-info/
 .flutter-plugins
 .flutter-plugins-dependencies
 
